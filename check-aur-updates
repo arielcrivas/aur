@@ -1,0 +1,180 @@
+#!/bin/env bash
+
+ME=$(basename "$0")
+VERSION=0.2
+
+declare -A Colors
+
+Colors[Reset]="\e[0m"
+Colors[Red]="${Colors[Reset]}\e[31m"
+Colors[Green]="${Colors[Reset]}\e[32m"
+Colors[Yellow]="${Colors[Reset]}\e[33m"
+Colors[White]="${Colors[Reset]}\e[39m"
+
+Plain() {
+  local Text="$1"
+  shift
+  printf "    ${Colors[White]}${Text}${Colors[Reset]}\n" "$@" >&2
+}
+
+Message() {
+  local Text="$1"
+  shift
+  printf "${Colors[Green]}==> ${Colors[White]}${Text}${Colors[Reset]}\n" "$@" >&2
+}
+
+Error() {
+  local Text="$1"
+  shift
+  printf "${Colors[Red]}==> error: ${Colors[White]}${Text}${Colors[Reset]}\n" "$@" >&2
+}
+
+Warning() {
+  local Text="$1"
+  shift
+  printf "${Colors[Yellow]}==> ${Colors[White]}${Text}${Colors[Reset]}\n" "$@" >&2
+}
+
+PrintLine() {
+  printf "${Colors[White]}%s ${Colors[Green]}%s${Colors[White]} -> ${Colors[Green]}%s${Colors[Reset]}\n" "$@"
+}
+
+ShowHelp() {
+  cat >&2 << EOF
+Usage:
+\$ ${ME} [-n|--nocolor] [-h|--help] [--version]
+EOF
+  exit 0
+}
+
+ShowVersion() {
+  cat >&2 << EOF
+${ME} ${VERSION}
+EOF
+  exit 0
+}
+
+CleanUp() {
+  [[ -n ${TempFile+x} ]] && [[ -s $TempFile ]] && rm -f -- "$TempFile"
+  return 0
+}
+
+CheckInstalledPrograms() {
+  local Errors=0 Program
+
+  for Program in pacman curl jq; do
+    if ! type -p "$Program" &>/dev/null; then
+      (( Errors++ ))
+      Error 'missing program: %s'
+      if [[ $Program == pacman ]]; then
+        Plain "are you using Arch Linux or its derivatives?"
+      fi
+    fi
+  done
+
+  (( Errors )) && exit 1
+  return 0
+}
+
+ReadPackageNamesAndPackageVersions() {
+  local Buffer i Name
+
+  QueryURL='https://aur.archlinux.org/rpc/?v=5&type=info'
+  mapfile -t Buffer < <(pacman -Qm)
+
+  for (( i=0; i<${#Buffer[@]}; i++ )); do
+    Name=${Buffer[$i]%% *}
+    QueryURL="${QueryURL}&arg[]=$Name"
+    PkgNames=("${PkgNames[@]}" "$Name")
+    PkgVersions=("${PkgVersions[@]}" "${Buffer[$i]##* }")
+  done
+
+  PkgCount=${#PkgNames[@]}
+  return 0
+}
+
+PerformQuery() {
+  local ReturnValue
+
+  if (( ! PkgCount )); then
+    Warning 'no foreign packages were found'
+    exit 1
+  else
+    if (( PkgCount == 1 )); then
+      Message 'Querying AUR for 1 package...'
+    else
+      Message 'Querying AUR updates for %d packages...' $PkgCount
+    fi
+  fi
+
+  TempFile=$(mktemp -t .${ME}_XXXX.json)
+  curl --silent "$QueryURL" > "$TempFile"
+  ReturnValue=$?
+
+  if (( ReturnValue > 0 )); then
+    Error 'unable to perform AUR query.'
+    exit $ReturnValue
+  fi
+}
+
+ShowResults() {
+  local Args UpdatedPackages Filter NewVersion Diff
+
+  UpdatedPackages=0
+  Filter='.results[] | select((.Name == $Name) and (.Version != $version)).Version'
+
+  for (( i=0; i<$PkgCount; i++ )); do
+    Args=( --arg Name "${PkgNames[$i]}"
+           --arg version "${PkgVersions[$i]}" )
+
+    NewVersion=$(jq -r "${Args[@]}" "$Filter" "$TempFile")
+
+    if [[ -n $NewVersion ]]; then
+      Diff=$(vercmp "${PkgVersions[$i]}" "$NewVersion")
+      (( Diff >= 0 )) && continue
+      PrintLine "${PkgNames[$i]}" "${PkgVersions[$i]}" "$NewVersion"
+      (( UpdatedPackages++ ))
+    fi
+  done
+
+  if (( UpdatedPackages )); then
+    echo
+    if (( UpdatedPackages == 1 )); then
+      Message '1 package need to be updated'
+    else
+      Message '%d packages need to be updated' $UpdatedPackages
+    fi
+  else
+    Message 'no foreign packages need to be updated.'
+  fi
+}
+
+main() {
+  local -l Option
+
+  if (( $# )); then
+    Option=$1
+    if [[ $Option =~ -(h|-help) ]]; then
+      ShowHelp
+    elif [[ $Option == --version ]]; then
+      ShowVersion
+    else
+      while (( $# )); do
+        Option=$1; shift
+        if [[ $Option =~ -(n|-nocolor) ]]; then
+          unset Colors
+        fi
+      done
+    fi
+  fi
+
+  CheckInstalledPrograms
+  ReadPackageNamesAndPackageVersions
+  PerformQuery
+  ShowResults
+}
+
+trap CleanUp EXIT KILL TERM
+main "$@"
+
+# vim: ft=sh sts=2 sw=2 ts=2 et:
