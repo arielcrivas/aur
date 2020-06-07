@@ -1,7 +1,19 @@
 #!/bin/env bash
+##
+## check-aur-updates
+## Query AUR database for package updates
+##
+## Needed programs:
+##   pacman (obviously!)
+##   vercmp (bundled with pacman)
+##   curl (retrieve results from aur.archlinux.org)
+##   jq (to parse json)
 
-ME=$(basename "$0")
-VERSION=0.2
+ME=$(realpath "${BASH_SOURCE[0]}")
+MY_PATH=$(dirname "$ME")
+ME=$(basename "$ME")
+
+VERSION=0.21
 
 declare -A Colors
 
@@ -41,8 +53,10 @@ PrintLine() {
 
 ShowHelp() {
   cat >&2 << EOF
+Description:
+    Query AUR database for package updates
 Usage:
-\$ ${ME} [-n|--nocolor] [-h|--help] [--version]
+\$ ${ME} [-n|--nocolor] [-z|--use-chinese-mirror] [-h|--help] [--version]
 EOF
   exit 0
 }
@@ -79,14 +93,20 @@ CheckInstalledPrograms() {
 ReadPackageNamesAndPackageVersions() {
   local Buffer i Name
 
-  QueryURL='https://aur.archlinux.org/rpc/?v=5&type=info'
-  mapfile -t Buffer < <(pacman -Qm)
+  QueryURL='https://aur.'
+  if [[ -n ${UseChineseMirror+x} ]]; then
+    QueryURL+='tuna.tsinghua.edu.cn/'
+  else
+    QueryURL+='archlinux.org/'
+  fi
+  QueryURL+='rpc/?v=5&type=info'
 
+  mapfile -t Buffer < <(pacman -Qm)
   for (( i=0; i<${#Buffer[@]}; i++ )); do
     Name=${Buffer[$i]%% *}
-    QueryURL="${QueryURL}&arg[]=$Name"
-    PkgNames=("${PkgNames[@]}" "$Name")
-    PkgVersions=("${PkgVersions[@]}" "${Buffer[$i]##* }")
+    QueryURL+="&arg[]=$Name"
+    PkgNames+=("$Name")
+    PkgVersions+=("${Buffer[$i]##* }")
   done
 
   PkgCount=${#PkgNames[@]}
@@ -97,7 +117,7 @@ PerformQuery() {
   local ReturnValue
 
   if (( ! PkgCount )); then
-    Warning 'no foreign packages were found'
+    Warning 'no foreign packages were found.'
     exit 1
   else
     if (( PkgCount == 1 )); then
@@ -119,6 +139,13 @@ PerformQuery() {
 
 ShowResults() {
   local Args UpdatedPackages Filter NewVersion Diff
+  local ResultCount
+
+  ResultCount=$(jq '.results | length' "$TempFile" 2>/dev/null)
+  if (( ! ResultCount )); then
+    Error "can't parse results from json."
+    exit 1
+  fi
 
   UpdatedPackages=0
   Filter='.results[] | select((.Name == $Name) and (.Version != $version)).Version'
@@ -150,31 +177,43 @@ ShowResults() {
 }
 
 main() {
-  local -l Option
+  local -A Options
 
-  if (( $# )); then
-    Option=$1
-    if [[ $Option =~ -(h|-help) ]]; then
-      ShowHelp
-    elif [[ $Option == --version ]]; then
-      ShowVersion
-    else
-      while (( $# )); do
-        Option=$1; shift
-        if [[ $Option =~ -(n|-nocolor) ]]; then
-          unset Colors
-        fi
-      done
-    fi
+  if type -p args &>/dev/null; then
+    args=$(type -p args)
+  elif [[ -x $MY_PATH/args/args ]]; then
+    args="$MY_PATH"/args/args
+  else
+    Error 'el programa "%s" no fue encontrado.' args
+    printf 'Instale el programa args usando:\n$ yay -S args-git\n'
+    exit 1
   fi
 
-  CheckInstalledPrograms
-  ReadPackageNamesAndPackageVersions
-  PerformQuery
-  ShowResults
+  local -a expected_arguments
+
+  expected_arguments=(-n,--nocolor,--no-color
+         -z,--use-chinese-mirror
+         -h,--help
+         --version)
+  eval $("$args" Options "${expected_arguments[@]}" -- "$@")
+
+  if [[ -n "${Options[-h]}" ]]; then
+    ShowHelp
+  elif [[ -n "${Options[--version]}" ]]; then
+    ShowVersion
+  else
+    trap CleanUp EXIT KILL TERM
+
+    [[ -n "${Options[-n]}" ]] && unset Colors || :
+    [[ -n "${Options[-z]}" ]] && UseChineseMirror=1 || :
+
+    CheckInstalledPrograms
+    ReadPackageNamesAndPackageVersions
+    PerformQuery
+    ShowResults
+  fi
 }
 
-trap CleanUp EXIT KILL TERM
 main "$@"
 
 # vim: ft=sh sts=2 sw=2 ts=2 et:
